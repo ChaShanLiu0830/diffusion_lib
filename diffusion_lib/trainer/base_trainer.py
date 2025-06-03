@@ -204,8 +204,8 @@ class BaseTrainer:
                 self.optim.step()
             
             total_loss += loss.item()
-            num_batches += 1
+            # num_batches += 1
         
-        return total_loss / num_batches if num_batches > 0 else 0.0
+        return total_loss / len(dataloader)
             
     

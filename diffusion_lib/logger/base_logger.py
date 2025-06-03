@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Union
 import os
 from datetime import datetime
 # import logging
@@ -27,7 +27,7 @@ class BaseLogger:
             f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("-" * 50 + "\n")
 
-    def log(self, info: Dict[str, Any], step: int) -> None:
+    def log(self, info: Union[str, Dict[str, Any]]) -> None:
         """
         Logs training metrics.
 
@@ -36,10 +36,10 @@ class BaseLogger:
             step: Training step or epoch.
         """
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f"[{timestamp}] Step {step}: "
+        log_entry = f"[{timestamp}]: "
         
         # Format metrics
-        metrics_str = ", ".join([f"{key}: {value}" for key, value in info.items()])
+        metrics_str = ", ".join([f"{key}: {value}" for key, value in info.items()]) if isinstance(info, dict) else info
         log_entry += metrics_str
         
         # Write to file
