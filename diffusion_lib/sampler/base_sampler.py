@@ -16,12 +16,14 @@ class BaseSampler:
         for i in range(num_samples):
             samples = []
             for batch in dataloader:
-                # x_t = batch[0].to(self.device)
-                batch = batch.to(self.device)
-                x_t = torch.randn_like(batch)
+                batch = self.method.batch_operation(batch)
+                x_0 = self.method.get_target(batch)
+                x_t = self.method.get_noise(x_0.shape)
+                condition = self.method.get_condition(batch)
+                
                 for i in reversed(range(0, self.method.scheduler.num_timesteps, steps)):
                     t = torch.full((x_t.size(0),), i, device=self.device, dtype=torch.long)
-                    eps_pred = self.model(x_t, t)
+                    eps_pred = self.model(x_t, t, **condition)
                     x_t = self.method.p_sample(x_t, t, eps_pred)
                 
                 samples.append(x_t.detach().cpu())

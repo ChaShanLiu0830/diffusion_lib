@@ -4,227 +4,208 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from ..utils.func import repeat
 import torch.nn.functional as F
+from ..logger.base_logger import BaseLogger
+from tqdm import tqdm
+from ..manager.file_manager import FileManager
 
 
 class BaseTrainer:
-    def __init__(self, model: nn.Module, method: Any,  device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), optimizer: torch.optim.Optimizer = None, **kwargs):
-        self.model = model
+    """
+    Base trainer class for handling model training with proper state management.
+    
+    This class follows SOLID principles by separating concerns between training logic,
+    file management, and logging.
+    """
+    
+    def __init__(
+        self, 
+        model: nn.Module, 
+        method: Any,  
+        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), 
+        optimizer: torch.optim.Optimizer = None, 
+        logger: BaseLogger = None, 
+        config: dict = None, 
+        **kwargs
+    ):
+        """
+        Initialize the BaseTrainer.
+        
+        Args:
+            model: PyTorch model to train
+            method: Training method containing scheduler and loss computation
+            device: Device to run training on
+            optimizer: Optimizer for training (default: Adam with lr=1e-4)
+            logger: Logger for training metrics
+            config: Configuration dictionary for file management and training
+            **kwargs: Additional arguments
+        """
+        self.model = model.to(device)
         self.method = method
         self.device = device
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        self.optim = optimizer if optimizer is not None else torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        self.logger = logger
+        self.file_manager = FileManager(config=config if config is not None else {})
         
-    def train(self, dataloader: DataLoader, epochs: int = 100):
-        losses = []
-        for epoch in range(epochs):
-            tot_loss = 0.0
-            for batch in dataloader:
-                x_0 = batch.to(self.device)
-                t  = torch.randint(0, self.method.scheduler.num_timesteps, (x_0.size(0),),
-                                   device=self.device, dtype=torch.long)
-                x_t, eps = self.method.q_sample(x_0, t)
-                eps_pred = self.model(x_t, t)
-                loss     = F.mse_loss(eps_pred, eps)
+        # Training state
+        self.start_epoch = 0
+        self.best_val_loss = float('inf')
+        
+    def train(self, 
+              train_dataloader: DataLoader, 
+              valid_dataloader: DataLoader = None, 
+              epochs: int = 100, 
+              save_every: int = 10,
+              resume_training: bool = True) -> Dict[str, Any]:
+        """
+        Train the model with proper checkpointing and validation tracking.
+        
+        Args:
+            train_dataloader: DataLoader for training data
+            valid_dataloader: DataLoader for validation data
+            epochs: Total number of epochs to train
+            save_every: Save checkpoint every N epochs
+            resume_training: Whether to resume from existing checkpoint
+            
+        Returns:
+            Dict containing training history and final metrics
+        """
+        # Resume training if requested and checkpoint exists
+        if resume_training:
+            self._resume_training()
+        
+        training_history = {
+            'train_losses': [],
+            'val_losses': [],
+            'epochs': []
+        }
+        
+        for epoch in tqdm(range(self.start_epoch, epochs), desc="Training"):
+            info = {'epoch': epoch}
+            
+            # Training phase
+            self.model.train()
+            train_loss = self._run_epoch(train_dataloader, grad=True)
+            info['train_loss'] = train_loss
+            training_history['train_losses'].append(train_loss)
+            
+            # Validation phase
+            val_loss = 0.0
+            if valid_dataloader is not None:
+                with torch.no_grad():
+                    self.model.eval()
+                    val_loss = self._run_epoch(valid_dataloader, grad=False)
+                    info['val_loss'] = val_loss
+                    training_history['val_losses'].append(val_loss)
+            
+            training_history['epochs'].append(epoch)
+            
+            # Logging
+            if self.logger is not None:
+                self.logger.log(info)
+                self.logger.log(f"Epoch {epoch:4d} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f}")
+            
+            # Save model based on validation loss improvement or regular intervals
+            should_save_regular = epoch % save_every == 0 or epoch == epochs - 1
+            model_saved = self.file_manager.save_model(
+                model=self.model,
+                epoch=epoch,
+                metrics=info,
+                optimizer=self.optim
+            )
+            
+            # Save at regular intervals if not saved due to improvement
+            if should_save_regular and not model_saved and not self.file_manager.save_best_only:
+                self.file_manager.save_model(
+                    model=self.model,
+                    epoch=epoch,
+                    metrics=info,
+                    optimizer=self.optim
+                )
+            
+            # Update best validation loss for tracking
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                if self.logger is not None:
+                    self.logger.log(f"New best validation loss: {val_loss:.4f}")
+        
+        # Final training summary
+        final_metrics = {
+            'final_train_loss': training_history['train_losses'][-1] if training_history['train_losses'] else 0.0,
+            'final_val_loss': training_history['val_losses'][-1] if training_history['val_losses'] else 0.0,
+            'best_val_loss': self.best_val_loss,
+            'total_epochs_trained': len(training_history['epochs'])
+        }
+        
+        if self.logger is not None:
+            self.logger.log("Training completed!")
+            self.logger.log(final_metrics)
+        
+        return {
+            'history': training_history,
+            'final_metrics': final_metrics
+        }
+    
+    def _resume_training(self) -> None:
+        """
+        Resume training from the latest checkpoint.
+        """
+        resume_info = self.file_manager.get_resume_info()
+        
+        if resume_info['has_checkpoint']:
+            checkpoint_info = self.file_manager.load_checkpoint(
+                model=self.model,
+                device=self.device,
+                optimizer=self.optim
+            )
+            
+            self.start_epoch = checkpoint_info['epoch'] + 1
+            self.best_val_loss = checkpoint_info['best_val_loss']
+            
+            if self.logger is not None:
+                self.logger.log(f"Resumed training from epoch {checkpoint_info['epoch']}")
+                self.logger.log(f"Best validation loss so far: {self.best_val_loss:.4f}")
+        else:
+            if self.logger is not None:
+                self.logger.log("No checkpoint found, starting training from scratch")
+    
+    def _run_epoch(self, dataloader: DataLoader, grad: bool = True) -> float:
+        """
+        Run a single epoch of training or validation.
+        
+        Args:
+            dataloader: DataLoader to iterate over
+            grad: Whether to compute gradients and update weights
+            
+        Returns:
+            Average loss for the epoch
+        """
+        total_loss = 0.0
+        num_batches = 0
+        
+        for batch in dataloader:
+            batch = self.method.batch_operation(batch)
+            x_0 = self.method.get_target(batch)
+            condition = self.method.get_condition(batch)
+            
+            t = torch.randint(
+                0, self.method.scheduler.num_timesteps, 
+                (x_0.size(0),),
+                device=self.device, 
+                dtype=torch.long
+            )
+            
+            x_t, eps = self.method.q_sample(x_0, t, **condition)
+            eps_pred = self.model(x_t, t)
+            loss = self.method.compute_loss(eps_pred, eps)
 
+            if grad:
                 self.optim.zero_grad()
                 loss.backward()
                 self.optim.step()
-                tot_loss += loss.item()
-            losses.append(tot_loss / len(dataloader))
-            if epoch % 100 == 0 or epoch == epochs - 1:
-                print(f"Epoch {epoch:4d} | loss {losses[-1]:.4f}")
-        return losses
-    
-        
-        
-        
-# class BaseTrainer:
-#     """Base trainer class encapsulating the main training logic for diffusion models."""
-    
-#     def __init__(self, model: nn.Module, dataset: DataLoader, method: Any, 
-#                  optimizer: torch.optim.Optimizer, logger: Optional[Any] = None, 
-#                  evaluator: Optional[Any] = None, device: str = "cuda"):
-#         """
-#         BaseTrainer encapsulates the main training logic for diffusion models.
-
-#         Args:
-#             model: Neural network to train (e.g., UNet).
-#             dataset: DataLoader yielding batches (Tensor or Dict).
-#             method: Diffusion method with forward/backward processes.
-#             optimizer: Optimizer for training the model.
-#             logger: Optional logger to track training progress.
-#             evaluator: Optional evaluator for sample quality.
-#             device: Device to run training on.
-#         """
-#         self.model = model
-#         self.dataset = dataset
-#         self.method = method
-#         self.optimizer = optimizer
-#         self.logger = logger
-#         self.evaluator = evaluator
-#         self.device = device
-        
-#         # Move model to device
-#         self.model.to(self.device)
-        
-#         # Set model in method if it has set_model method
-#         if hasattr(self.method, 'set_model'):
-#             self.method.set_model(self.model)
-        
-#         self.global_step = 0
-
-#     def train(self, num_epochs: int) -> None:
-#         """
-#         Runs the main training loop.
-
-#         Args:
-#             num_epochs: Number of epochs to train.
-#         """
-#         self.model.train()
-        
-#         for epoch in range(num_epochs):
-#             epoch_loss = 0.0
-#             num_batches = 0
             
-#             for batch_idx, batch in enumerate(self.dataset):
-#                 # Perform batch operation if needed
-#                 self.method.batch_operation(batch)
-                
-#                 # Training step
-#                 loss = self._train_step(batch)
-#                 epoch_loss += loss
-#                 num_batches += 1
-                
-#                 # Log step-level metrics
-#                 if self.logger and batch_idx % 100 == 0:
-#                     self.logger.log({"loss": loss, "epoch": epoch, "batch": batch_idx}, 
-#                                    step=self.global_step)
-                
-#                 self.global_step += 1
+            total_loss += loss.item()
+            num_batches += 1
+        
+        return total_loss / num_batches if num_batches > 0 else 0.0
             
-#             # Log epoch-level metrics
-#             avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
-#             if self.logger:
-#                 self.logger.log({"epoch_loss": avg_epoch_loss, "epoch": epoch}, 
-#                                step=epoch)
-            
-#             print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_epoch_loss:.6f}")
-            
-#             # Evaluation if evaluator is provided
-#             if self.evaluator and (epoch + 1) % 100 == 0:
-#                 self._evaluate(epoch)
-
-#     def _train_step(self, batch: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> float:
-#         """
-#         Performs one optimization step and updates the model.
-
-#         Args:
-#             batch: A single batch of data.
-
-#         Returns:
-#             loss: Calculated loss for the current batch.
-#         """
-        
-#         x0 = self.method.get_target(batch)
-#         # print(x0)
-#         # Zero gradients
-#         self.optimizer.zero_grad()
-        
-#         # Sample random timesteps
-#         t = torch.randint(0, self.method.scheduler.num_timesteps, (x0.shape[0],), 
-#                          device=self.device, dtype=torch.long)
-        
-#         # Forward diffusion process - get noised data and target noise
-#         x_t, noise = self.method.q_sample(x0, t)
-        
-#         predicted_noise = self.model(x_t, t)
-        
-#         # Compute loss between predicted and actual noise
-#         loss = self.method.compute_loss(predicted_noise, noise)
-        
-#         # Backward pass
-#         loss.backward()
-        
-#         # Gradient clipping
-#         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
-#         # Optimizer step
-#         self.optimizer.step()
-        
-#         return loss.item()
-    
-#     def _evaluate(self, epoch: int) -> None:
-#         """
-#         Performs evaluation using the evaluator.
-        
-#         Args:
-#             epoch: Current epoch number.
-#         """
-#         if self.evaluator is None:
-#             return
-            
-#         self.model.eval()
-#         with torch.no_grad():
-#             # Generate samples for evaluation
-#             sample_batch = next(iter(self.dataset))
-#             x0 = self.method.get_target(sample_batch)
-            
-#             # Generate samples using simplified reverse process
-#             data_shape = x0.shape[1:]
-#             num_eval_samples = x0.shape[0]
-            
-#             # Start from noise
-#             x_t = torch.randn(num_eval_samples, *data_shape, device=self.device)
-            
-#             # Quick sampling with fewer steps for evaluation
-#             num_timesteps = self.method.scheduler.num_timesteps
-#             eval_steps = list(reversed(range(1, num_timesteps, 10)))  # Use fewer steps for faster evaluation
-            
-#             for t in eval_steps:
-#                 t_tensor = torch.full((num_eval_samples,), t, device=self.device, dtype=torch.long)
-#                 predicted_noise = self.model(x_t, t_tensor)
-#                 x_t = self.method.p_sample(x_t, t_tensor, predicted_noise)
-            
-#             # Evaluate generated samples against reference
-#             metrics = self.evaluator.compute_metrics(x_t, x0)
-            
-#             if self.logger:
-#                 self.logger.log(metrics, step=epoch)
-#                 if hasattr(self.logger, 'log_image'):
-#                     self.logger.log_image(x_t, "generated_samples", step=epoch)
-        
-#         self.model.train()
-    
-#     def save_checkpoint(self, path: str, epoch: int) -> None:
-#         """
-#         Save model checkpoint.
-        
-#         Args:
-#             path: Path to save checkpoint.
-#             epoch: Current epoch.
-#         """
-#         checkpoint = {
-#             'model_state_dict': self.model.state_dict(),
-#             'optimizer_state_dict': self.optimizer.state_dict(),
-#             'epoch': epoch,
-#             'global_step': self.global_step,
-#         }
-#         torch.save(checkpoint, path)
-    
-#     def load_checkpoint(self, path: str) -> int:
-#         """
-#         Load model checkpoint.
-        
-#         Args:
-#             path: Path to checkpoint file.
-            
-#         Returns:
-#             epoch: Epoch number from checkpoint.
-#         """
-#         checkpoint = torch.load(path, map_location=self.device)
-#         self.model.load_state_dict(checkpoint['model_state_dict'])
-#         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-#         self.global_step = checkpoint.get('global_step', 0)
-#         return checkpoint['epoch'] 
-    
-    
     

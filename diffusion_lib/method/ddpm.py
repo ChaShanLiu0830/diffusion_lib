@@ -40,7 +40,7 @@ class DDPMScheduler:
 
 # ----------------- Diffusion model ---------------------------
 class DDPM(nn.Module):
-    def __init__(self, scheduler: DDPMScheduler):
+    def __init__(self, scheduler: DDPMScheduler, device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         """
         DDPM diffusion method implementation.
         
@@ -49,6 +49,7 @@ class DDPM(nn.Module):
         """
         super().__init__()
         self.scheduler = scheduler
+        self.device = device
     # ----- forward q(x_t | x_0) -----
     def q_sample(self, x0: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         alpha_bar_t  = repeat(self.scheduler.sqrt_alphas_cumprod[t], x0)
@@ -114,9 +115,15 @@ class DDPM(nn.Module):
         Returns:
             batch: Processed batch (unchanged in base implementation).
         """
-        return batch.to("cuda:0")
+        return batch.to(self.device)
     
     def get_target(self, batch: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
-        return batch.to("cuda:0")
+        return batch.to(self.device)
+    
+    def get_noise(self, shape: Tuple[int, ...]) -> torch.Tensor:
+        return torch.randn(shape).to(self.device)
+    
+    def get_condition(self, batch: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
+        return {}
     
     
