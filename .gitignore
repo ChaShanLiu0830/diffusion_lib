@@ -9,7 +9,8 @@
 *.pt.tar.bz2
 *.pth.tar.xz
 *.pt.tar.xz
-
+*.log
+*checkpoints*/
 *.ipynb
 *test/
 

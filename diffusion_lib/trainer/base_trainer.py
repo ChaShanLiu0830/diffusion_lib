@@ -73,10 +73,12 @@ class BaseTrainer:
         if resume_training:
             self._resume_training()
         
+        # Get restored loss histories from file manager
+        restored_histories = self.file_manager.get_loss_histories()
         training_history = {
-            'train_losses': [],
-            'val_losses': [],
-            'epochs': []
+            'train_losses': restored_histories['training_loss_history'],
+            'val_losses': restored_histories['val_loss_history'],
+            'epochs': list(range(len(restored_histories['training_loss_history'])))
         }
         
         for epoch in tqdm(range(self.start_epoch, epochs), desc="Training"):

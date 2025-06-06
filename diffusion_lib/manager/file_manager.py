@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import json
 from pathlib import Path
 
@@ -11,7 +11,8 @@ class FileManager:
     Manages file operations for model saving, loading, and training state persistence.
     
     This class follows the Single Responsibility Principle by focusing solely on
-    file management operations for machine learning workflows.
+    file management operations for machine learning workflows. It maintains complete
+    training and validation loss histories for training resumption.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -37,6 +38,10 @@ class FileManager:
         self.best_val_loss = float('inf')
         self.best_model_path = None
         
+        # Track loss histories
+        self.training_loss_history: List[float] = []
+        self.val_loss_history: List[float] = []
+        
         # Checkpoint tracking
         self.checkpoint_file = self.save_dir / 'training_state.json'
         self._load_training_state()
@@ -45,12 +50,13 @@ class FileManager:
                    optimizer: Optional[torch.optim.Optimizer] = None,
                    scheduler: Optional[Any] = None) -> bool:
         """
-        Save model checkpoint with training metadata.
+        Save model checkpoint with training metadata and update loss histories.
         
         Args:
             model: PyTorch model to save
             epoch: Current training epoch
             metrics: Dictionary containing training metrics
+                    Expected keys: 'train_loss', 'val_loss'
             optimizer: Optional optimizer state to save
             scheduler: Optional scheduler state to save
             
@@ -58,6 +64,11 @@ class FileManager:
             bool: True if model was saved, False otherwise
         """
         val_loss = metrics.get('val_loss', float('inf'))
+        train_loss = metrics.get('train_loss', float('inf'))
+        
+        # Update loss histories
+        self._update_loss_histories(train_loss, val_loss)
+        
         should_save = False
         
         # Determine if we should save this model
@@ -76,6 +87,8 @@ class FileManager:
                 'model_state_dict': model.state_dict(),
                 'metrics': metrics,
                 'best_val_loss': self.best_val_loss,
+                'training_loss_history': self.training_loss_history,
+                'val_loss_history': self.val_loss_history,
                 'config': self.config
             }
             
@@ -109,7 +122,7 @@ class FileManager:
             device: Device to load the model on
             
         Returns:
-            Dict containing loaded checkpoint metadata
+            Dict containing loaded checkpoint metadata including loss histories
             
         Raises:
             FileNotFoundError: If no best model is found
@@ -120,10 +133,16 @@ class FileManager:
         checkpoint = torch.load(self.best_model_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
+        # Restore loss histories if available
+        self.training_loss_history = checkpoint.get('training_loss_history', [])
+        self.val_loss_history = checkpoint.get('val_loss_history', [])
+        
         return {
             'epoch': checkpoint.get('epoch', 0),
             'metrics': checkpoint.get('metrics', {}),
-            'best_val_loss': checkpoint.get('best_val_loss', float('inf'))
+            'best_val_loss': checkpoint.get('best_val_loss', float('inf')),
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history
         }
     
     def load_checkpoint(self, model: nn.Module, device: torch.device,
@@ -139,10 +158,16 @@ class FileManager:
             scheduler: Optional scheduler to restore state
             
         Returns:
-            Dict containing checkpoint information for resuming training
+            Dict containing checkpoint information for resuming training including loss histories
         """
         if self.best_model_path is None or not os.path.exists(self.best_model_path):
-            return {'epoch': 0, 'metrics': {}, 'best_val_loss': float('inf')}
+            return {
+                'epoch': 0, 
+                'metrics': {}, 
+                'best_val_loss': float('inf'),
+                'training_loss_history': [],
+                'val_loss_history': []
+            }
         
         checkpoint = torch.load(self.best_model_path, map_location=device)
         
@@ -159,11 +184,27 @@ class FileManager:
         
         # Update internal state
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.training_loss_history = checkpoint.get('training_loss_history', [])
+        self.val_loss_history = checkpoint.get('val_loss_history', [])
         
         return {
             'epoch': checkpoint.get('epoch', 0),
             'metrics': checkpoint.get('metrics', {}),
-            'best_val_loss': self.best_val_loss
+            'best_val_loss': self.best_val_loss,
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history
+        }
+    
+    def get_loss_histories(self) -> Dict[str, List[float]]:
+        """
+        Get the complete training and validation loss histories.
+        
+        Returns:
+            Dict containing training and validation loss histories
+        """
+        return {
+            'training_loss_history': self.training_loss_history.copy(),
+            'val_loss_history': self.val_loss_history.copy()
         }
     
     def get_resume_info(self) -> Dict[str, Any]:
@@ -171,17 +212,32 @@ class FileManager:
         Get information needed to resume training.
         
         Returns:
-            Dict containing resume information
+            Dict containing resume information including loss histories
         """
         return {
             'best_val_loss': self.best_val_loss,
             'best_model_path': self.best_model_path,
-            'has_checkpoint': self.best_model_path is not None and os.path.exists(self.best_model_path)
+            'has_checkpoint': self.best_model_path is not None and os.path.exists(self.best_model_path),
+            'training_loss_history': self.training_loss_history.copy(),
+            'val_loss_history': self.val_loss_history.copy()
         }
+    
+    def _update_loss_histories(self, train_loss: float, val_loss: float) -> None:
+        """
+        Update the training and validation loss histories.
+        
+        Args:
+            train_loss: Current training loss to append
+            val_loss: Current validation loss to append
+        """
+        if train_loss != float('inf'):
+            self.training_loss_history.append(train_loss)
+        if val_loss != float('inf'):
+            self.val_loss_history.append(val_loss)
     
     def _save_training_state(self, epoch: int, metrics: Dict[str, Any]) -> None:
         """
-        Save current training state to JSON file.
+        Save current training state to JSON file including loss histories.
         
         Args:
             epoch: Current epoch
@@ -191,25 +247,31 @@ class FileManager:
             'epoch': epoch,
             'metrics': metrics,
             'best_val_loss': self.best_val_loss,
-            'best_model_path': self.best_model_path
+            'best_model_path': self.best_model_path,
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history
         }
         
         with open(self.checkpoint_file, 'w') as f:
             json.dump(state, f, indent=2)
     
     def _load_training_state(self) -> None:
-        """Load previous training state if it exists."""
+        """Load previous training state if it exists, including loss histories."""
         if self.checkpoint_file.exists():
             with open(self.checkpoint_file, 'r') as f:
                 state = json.load(f)
                 self.best_val_loss = state.get('best_val_loss', float('inf'))
                 self.best_model_path = state.get('best_model_path')
+                self.training_loss_history = state.get('training_loss_history', [])
+                self.val_loss_history = state.get('val_loss_history', [])
     
     def _save_best_model_info(self) -> None:
-        """Save information about the best model."""
+        """Save information about the best model including loss histories."""
         best_info = {
             'best_model_path': self.best_model_path,
-            'best_val_loss': self.best_val_loss
+            'best_val_loss': self.best_val_loss,
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history
         }
         
         best_info_file = self.save_dir / 'best_model_info.json'
