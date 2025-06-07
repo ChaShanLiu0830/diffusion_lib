@@ -106,23 +106,22 @@ class BaseTrainer:
                 self.logger.log(info)
                 self.logger.log(f"Epoch {epoch:4d} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f}")
             
-            # Save model based on validation loss improvement or regular intervals
+            # Save model - FileManager will decide best vs regular based on validation loss
             should_save_regular = epoch % save_every == 0 or epoch == epochs - 1
-            model_saved = self.file_manager.save_model(
+            save_result = self.file_manager.save_model(
                 model=self.model,
                 epoch=epoch,
                 metrics=info,
-                optimizer=self.optim
+                optimizer=self.optim,
+                force_save=should_save_regular  # Force regular save at intervals
             )
             
-            # Save at regular intervals if not saved due to improvement
-            if should_save_regular and not model_saved and not self.file_manager.save_best_only:
-                self.file_manager.save_model(
-                    model=self.model,
-                    epoch=epoch,
-                    metrics=info,
-                    optimizer=self.optim
-                )
+            # Log what was saved
+            if self.logger is not None:
+                if save_result['best_saved']:
+                    self.logger.log(f"Saved new best model with validation loss: {val_loss:.4f}")
+                if save_result['regular_saved']:
+                    self.logger.log(f"Saved regular checkpoint at epoch {epoch}")
             
             # Update best validation loss for tracking
             if val_loss < self.best_val_loss:
@@ -147,7 +146,7 @@ class BaseTrainer:
     
     def _resume_training(self) -> None:
         """
-        Resume training from the latest checkpoint.
+        Resume training from the most recent checkpoint (automatically selected).
         """
         resume_info = self.file_manager.get_resume_info()
         
@@ -163,6 +162,7 @@ class BaseTrainer:
             
             if self.logger is not None:
                 self.logger.log(f"Resumed training from epoch {checkpoint_info['epoch']}")
+                self.logger.log(f"Starting from epoch {self.start_epoch}")
                 self.logger.log(f"Best validation loss so far: {self.best_val_loss:.4f}")
         else:
             if self.logger is not None:

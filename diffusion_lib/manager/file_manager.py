@@ -48,7 +48,8 @@ class FileManager:
     
     def save_model(self, model: nn.Module, epoch: int, metrics: Dict[str, Any], 
                    optimizer: Optional[torch.optim.Optimizer] = None,
-                   scheduler: Optional[Any] = None) -> bool:
+                   scheduler: Optional[Any] = None,
+                   force_save: bool = False) -> Dict[str, bool]:
         """
         Save model checkpoint with training metadata and update loss histories.
         
@@ -59,9 +60,10 @@ class FileManager:
                     Expected keys: 'train_loss', 'val_loss'
             optimizer: Optional optimizer state to save
             scheduler: Optional scheduler state to save
+            force_save: Force save as regular checkpoint regardless of save_best_only setting
             
         Returns:
-            bool: True if model was saved, False otherwise
+            Dict with keys 'best_saved' and 'regular_saved' indicating what was saved
         """
         val_loss = metrics.get('val_loss', float('inf'))
         train_loss = metrics.get('train_loss', float('inf'))
@@ -69,55 +71,101 @@ class FileManager:
         # Update loss histories
         self._update_loss_histories(train_loss, val_loss)
         
-        should_save = False
-        is_best_model = False
+        result = {'best_saved': False, 'regular_saved': False}
         
-        # Determine if we should save this model
-        if not self.save_best_only:
-            should_save = True
-        elif val_loss < self.best_val_loss:
+        # Check if this is a new best model
+        is_best_model = val_loss < self.best_val_loss
+        if is_best_model:
             self.best_val_loss = val_loss
-            should_save = True
-            is_best_model = True
         
-        if should_save:
-            # Use "_best" suffix for best models, epoch number for regular saves
-            if is_best_model:
-                model_path = self.save_dir / f"{self.model_name}_best.pth"
-            else:
-                model_path = self.save_dir / f"{self.model_name}_epoch_{epoch}.pth"
-            
-            # Prepare checkpoint data
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'metrics': metrics,
-                'best_val_loss': self.best_val_loss,
-                'training_loss_history': self.training_loss_history,
-                'val_loss_history': self.val_loss_history,
-                'config': self.config
-            }
-            
-            # Add optimizer and scheduler states if provided
-            if optimizer is not None:
-                checkpoint['optimizer_state_dict'] = optimizer.state_dict()
-            if scheduler is not None:
-                checkpoint['scheduler_state_dict'] = scheduler.state_dict()
-            
-            # Save the checkpoint
-            torch.save(checkpoint, model_path)
-            
-            # Update best model path if this is the best model
-            if is_best_model:
-                self.best_model_path = str(model_path)
-                self._save_best_model_info()
-            
-            # Save training state
-            self._save_training_state(epoch, metrics)
-            
-            return True
+        # Save as best model if it's the best
+        if is_best_model:
+            self._save_best_model(model, epoch, metrics, optimizer, scheduler)
+            result['best_saved'] = True
         
-        return False
+        # Save as regular checkpoint if forced or if save_best_only is False
+        if force_save:
+            self._save_regular_checkpoint(model, epoch, metrics, optimizer, scheduler)
+            result['regular_saved'] = True
+        
+        # Save training state
+        self._save_training_state(epoch, metrics)
+        
+        return result
+    
+    def _save_best_model(self, model: nn.Module, epoch: int, metrics: Dict[str, Any],
+                        optimizer: Optional[torch.optim.Optimizer] = None,
+                        scheduler: Optional[Any] = None) -> None:
+        """
+        Save the best model with '_best' suffix, overwriting previous best model.
+        
+        Args:
+            model: PyTorch model to save
+            epoch: Current training epoch
+            metrics: Dictionary containing training metrics
+            optimizer: Optional optimizer state to save
+            scheduler: Optional scheduler state to save
+        """
+        best_model_path = self.save_dir / f"{self.model_name}_best.pth"
+        
+        # Prepare checkpoint data
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'metrics': metrics,
+            'best_val_loss': self.best_val_loss,
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history,
+            'config': self.config,
+            'save_type': 'best_model'
+        }
+        
+        # Add optimizer and scheduler states if provided
+        if optimizer is not None:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        
+        # Save the best model (overwrites previous best)
+        torch.save(checkpoint, best_model_path)
+        self.best_model_path = str(best_model_path)
+        self._save_best_model_info()
+    
+    def _save_regular_checkpoint(self, model: nn.Module, epoch: int, metrics: Dict[str, Any],
+                               optimizer: Optional[torch.optim.Optimizer] = None,
+                               scheduler: Optional[Any] = None) -> None:
+        """
+        Save regular checkpoint with epoch number.
+        
+        Args:
+            model: PyTorch model to save
+            epoch: Current training epoch
+            metrics: Dictionary containing training metrics
+            optimizer: Optional optimizer state to save
+            scheduler: Optional scheduler state to save
+        """
+        checkpoint_path = self.save_dir / f"{self.model_name}_epoch_{epoch}.pth"
+        
+        # Prepare checkpoint data
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'metrics': metrics,
+            'best_val_loss': self.best_val_loss,
+            'training_loss_history': self.training_loss_history,
+            'val_loss_history': self.val_loss_history,
+            'config': self.config,
+            'save_type': 'regular_checkpoint'
+        }
+        
+        # Add optimizer and scheduler states if provided
+        if optimizer is not None:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        
+        # Save the checkpoint
+        torch.save(checkpoint, checkpoint_path)
     
     def load_best_model(self, model: nn.Module, device: torch.device) -> Dict[str, Any]:
         """
@@ -157,7 +205,7 @@ class FileManager:
                        optimizer: Optional[torch.optim.Optimizer] = None,
                        scheduler: Optional[Any] = None) -> Dict[str, Any]:
         """
-        Load the latest checkpoint for resuming training.
+        Load the most recent checkpoint for resuming training.
         
         Args:
             model: PyTorch model to load weights into
@@ -170,7 +218,29 @@ class FileManager:
         """
         best_model_path = self.save_dir / f"{self.model_name}_best.pth"
         
-        if not best_model_path.exists():
+        # Find the most recent checkpoint
+        checkpoint_path = None
+        latest_epoch = -1
+        
+        # Check best model
+        if best_model_path.exists():
+            best_checkpoint = torch.load(best_model_path, map_location='cpu')
+            best_epoch = best_checkpoint.get('epoch', -1)
+            if best_epoch > latest_epoch:
+                checkpoint_path = best_model_path
+                latest_epoch = best_epoch
+        
+        # Check regular checkpoints
+        checkpoint_files = list(self.save_dir.glob(f"{self.model_name}_epoch_*.pth"))
+        if checkpoint_files:
+            checkpoint_files.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            latest_regular = checkpoint_files[-1]
+            regular_epoch = int(latest_regular.stem.split('_')[-1])
+            if regular_epoch > latest_epoch:
+                checkpoint_path = latest_regular
+                latest_epoch = regular_epoch
+        
+        if checkpoint_path is None:
             return {
                 'epoch': 0, 
                 'metrics': {}, 
@@ -179,7 +249,7 @@ class FileManager:
                 'val_loss_history': []
             }
         
-        checkpoint = torch.load(best_model_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
         
         # Load model state
         model.load_state_dict(checkpoint['model_state_dict'])
