@@ -70,6 +70,7 @@ class FileManager:
         self._update_loss_histories(train_loss, val_loss)
         
         should_save = False
+        is_best_model = False
         
         # Determine if we should save this model
         if not self.save_best_only:
@@ -77,9 +78,14 @@ class FileManager:
         elif val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             should_save = True
+            is_best_model = True
         
         if should_save:
-            model_path = self.save_dir / f"{self.model_name}_epoch_{epoch}.pth"
+            # Use "_best" suffix for best models, epoch number for regular saves
+            if is_best_model:
+                model_path = self.save_dir / f"{self.model_name}_best.pth"
+            else:
+                model_path = self.save_dir / f"{self.model_name}_epoch_{epoch}.pth"
             
             # Prepare checkpoint data
             checkpoint = {
@@ -102,7 +108,7 @@ class FileManager:
             torch.save(checkpoint, model_path)
             
             # Update best model path if this is the best model
-            if val_loss <= self.best_val_loss:
+            if is_best_model:
                 self.best_model_path = str(model_path)
                 self._save_best_model_info()
             
@@ -127,10 +133,12 @@ class FileManager:
         Raises:
             FileNotFoundError: If no best model is found
         """
-        if self.best_model_path is None or not os.path.exists(self.best_model_path):
+        best_model_path = self.save_dir / f"{self.model_name}_best.pth"
+        
+        if not best_model_path.exists():
             raise FileNotFoundError("No best model found to load")
         
-        checkpoint = torch.load(self.best_model_path, map_location=device)
+        checkpoint = torch.load(best_model_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
         # Restore loss histories if available
@@ -160,7 +168,9 @@ class FileManager:
         Returns:
             Dict containing checkpoint information for resuming training including loss histories
         """
-        if self.best_model_path is None or not os.path.exists(self.best_model_path):
+        best_model_path = self.save_dir / f"{self.model_name}_best.pth"
+        
+        if not best_model_path.exists():
             return {
                 'epoch': 0, 
                 'metrics': {}, 
@@ -169,7 +179,7 @@ class FileManager:
                 'val_loss_history': []
             }
         
-        checkpoint = torch.load(self.best_model_path, map_location=device)
+        checkpoint = torch.load(best_model_path, map_location=device)
         
         # Load model state
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -214,10 +224,12 @@ class FileManager:
         Returns:
             Dict containing resume information including loss histories
         """
+        best_model_path = self.save_dir / f"{self.model_name}_best.pth"
+        
         return {
             'best_val_loss': self.best_val_loss,
-            'best_model_path': self.best_model_path,
-            'has_checkpoint': self.best_model_path is not None and os.path.exists(self.best_model_path),
+            'best_model_path': str(best_model_path) if best_model_path.exists() else None,
+            'has_checkpoint': best_model_path.exists(),
             'training_loss_history': self.training_loss_history.copy(),
             'val_loss_history': self.val_loss_history.copy()
         }
