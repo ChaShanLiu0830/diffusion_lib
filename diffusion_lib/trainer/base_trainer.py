@@ -127,8 +127,6 @@ class BaseTrainer:
             # Update best validation loss for tracking
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                if self.logger is not None:
-                    self.logger.log(f"New best validation loss: {val_loss:.4f}")
         
         # Final training summary
         final_metrics = {
@@ -196,8 +194,8 @@ class BaseTrainer:
                 dtype=torch.long
             )
             
-            x_t, eps = self.method.q_sample(x_0, t, **condition)
-            eps_pred = self.model(x_t, t)
+            x_t, eps = self.method.q_sample(x_0, t)
+            eps_pred = self.model(x_t, t, **condition)
             loss = self.method.compute_loss(eps_pred, eps)
 
             if grad:
